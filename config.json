@@ -2,5 +2,23 @@
   "terminology_server": "https://tx.ontoserver.csiro.au/fhir",
   "versions_to_compare": 12,
   "output_filename": "vs-diff.tsv",
-  "data_folder": "~/data/vs-differ"
+  "data_folder": "~/data/vs-differ",
+  "ig": [
+    {
+      "id": "hl7.fhir.au.base",
+      "version": "6.0.0"
+    },
+    {
+      "id": "hl7.fhir.au.core",
+      "version": "2.0.0"
+    },
+    {
+      "id": "hl7.fhir.au.ereq",
+      "version": "dev"
+    },
+    {
+      "id": "hl7.fhir.au.ps",
+      "version": "dev"
+    }
+  ]
 }

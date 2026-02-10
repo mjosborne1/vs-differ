@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple, cast
 from urllib.parse import quote
 
 import requests  # type: ignore[import-not-found]
@@ -199,9 +199,6 @@ def expand_valueset_count(
     
     # Build URL with encoded parameters
     url = f"{base_url}?url={quote(valueset_url)}&system-version={system_version}&count=0&offset=0"
-    if valueset_url == "https://healthterminologies.gov.au/fhir/ValueSet/healthcare-organisation-role-type-1":
-        sys.stdout.write(f"url:{url}\n")
-        sys.stdout.flush()
     try:
         response = requests.get(url, timeout=90)
     except requests.RequestException as exc:
@@ -300,14 +297,133 @@ def write_tsv(
             writer.writerow(row)
 
 
+def get_trending_status(row: Dict[str, object], version_columns: List[str]) -> Dict[str, str]:
+    """Determine which version cells should be highlighted (red for decreasing values)."""
+    trending = {}
+    for i, version in enumerate(version_columns):
+        current_val = row.get(version)
+        if current_val == "" or current_val is None:
+            trending[version] = ""
+            continue
+        
+        try:
+            current_int = int(cast(Any, current_val))
+        except (ValueError, TypeError):
+            trending[version] = ""
+            continue
+        
+        # Check if value decreased compared to previous version
+        if i > 0:
+            prev_version = version_columns[i - 1]
+            prev_val = row.get(prev_version)
+            try:
+                prev_int = int(cast(Any, prev_val))
+                if current_int < prev_int:
+                    trending[version] = "trending-down"
+                else:
+                    trending[version] = ""
+            except (ValueError, TypeError):
+                trending[version] = ""
+        else:
+            trending[version] = ""
+    
+    return trending
+
+
+def write_html(
+    rows: List[Dict[str, object]], output_path: str, version_columns: List[str]
+) -> None:
+    """Write HTML file with trending visualization (red for decreasing values)."""
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    headers = [
+        "valueset_url",
+        "valueset_name",
+        "ncts",
+        "snomed_au",
+        "structure_definition_url",
+        "structure_definition_name",
+    ] + version_columns
+    
+    html_content = [
+        "<!DOCTYPE html>",
+        "<html>",
+        "<head>",
+        "<meta charset='UTF-8'>",
+        "<title>ValueSet Expansion Counts</title>",
+        "<style>",
+        "  body { font-family: Arial, sans-serif; margin: 20px; }",
+        "  table { border-collapse: collapse; width: 100%; }",
+        "  th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }",
+        "  th { background-color: #4CAF50; color: white; }",
+        "  tr:nth-child(even) { background-color: #f2f2f2; }",
+        "  .trending-down { background-color: #ffcccc; color: red; font-weight: bold; }",
+        "  .version-col { text-align: center; }",
+        "</style>",
+        "</head>",
+        "<body>",
+        "<h1>ValueSet Expansion Counts - Trending Analysis</h1>",
+        "<table>",
+    ]
+    
+    # Write header row
+    html_content.append("<tr>")
+    for header in headers:
+        if header in version_columns:
+            html_content.append(f"<th class='version-col'>{header}</th>")
+        else:
+            html_content.append(f"<th>{header}</th>")
+    html_content.append("</tr>")
+    
+    # Write data rows
+    for row in rows:
+        trending = get_trending_status(row, version_columns)
+        html_content.append("<tr>")
+        
+        for header in headers:
+            value = row.get(header, "")
+            is_version_col = header in version_columns
+            
+            if is_version_col and trending.get(header) == "trending-down":
+                html_content.append(
+                    f"<td class='trending-down version-col'>{value}</td>"
+                )
+            elif is_version_col:
+                html_content.append(f"<td class='version-col'>{value}</td>")
+            else:
+                html_content.append(f"<td>{value}</td>")
+        
+        html_content.append("</tr>")
+    
+    html_content.extend([
+        "</table>",
+        "<p style='margin-top: 20px; font-size: 12px;'>",
+        "<strong>Legend:</strong> Cells highlighted in red indicate a decrease in expansion count from the previous version.",
+        "</p>",
+        "</body>",
+        "</html>",
+    ])
+    
+    with open(output_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(html_content))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Traverse FHIR packages to list bound ValueSets and compare SNOMED CT AU expansions."
         )
     )
-    parser.add_argument("ig_id", help="FHIR IG package id (e.g. hl7.fhir.au.base)")
-    parser.add_argument("ig_version", help="FHIR IG package version (e.g. 1.2.0)")
+    parser.add_argument(
+        "ig_id", 
+        nargs="?",
+        help="FHIR IG package id (e.g. hl7.fhir.au.base). If not provided, uses 'ig' array from config."
+    )
+    parser.add_argument(
+        "ig_version",
+        nargs="?",
+        help="FHIR IG package version (e.g. 1.2.0). If not provided, uses 'ig' array from config."
+    )
     parser.add_argument(
         "--config",
         default=DEFAULT_CONFIG_PATH,
@@ -330,6 +446,7 @@ def main() -> int:
     data_folder = expand_user(str(config.get("data_folder", "~/data/vs-differ")))
 
     output_path = os.path.join(data_folder, output_filename)
+    html_output_path = output_path.replace(".tsv", ".html")
     log_dir = os.path.join(data_folder, "logs")
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "vs-differ.log")
@@ -339,18 +456,40 @@ def main() -> int:
         filename=log_file,
     )
 
-    packages = gather_packages(cache_dir, args.ig_id, args.ig_version)
-    if not packages:
-        logging.error("No packages found for %s#%s", args.ig_id, args.ig_version)
-        return 1
+    # Determine which IGs to process
+    if args.ig_id and args.ig_version:
+        igs = [{"id": args.ig_id, "version": args.ig_version}]
+    else:
+        igs = config.get("ig", [])
+        if not igs:
+            logging.error("No IGs specified in config and no command-line arguments provided")
+            return 1
 
     bound_valuesets: List[Dict[str, str]] = []
     valueset_index: Dict[str, Dict[str, Any]] = {}
 
-    for package_id, version, package_dir in packages:
-        logging.info("Scanning %s#%s", package_id, version)
-        bound_valuesets.extend(extract_bound_valuesets(package_dir))
-        valueset_index.update(collect_valuesets(package_dir))
+    # Process each IG
+    for ig in igs:
+        ig_id = ig.get("id")
+        ig_version = ig.get("version")
+        if not ig_id or not ig_version:
+            logging.warning("Invalid IG config: missing id or version")
+            continue
+        
+        logging.info("Processing IG: %s#%s", ig_id, ig_version)
+        packages = gather_packages(cache_dir, ig_id, ig_version)
+        if not packages:
+            logging.warning("No packages found for %s#%s", ig_id, ig_version)
+            continue
+
+        for package_id, version, package_dir in packages:
+            logging.info("Scanning %s#%s", package_id, version)
+            bound_valuesets.extend(extract_bound_valuesets(package_dir))
+            valueset_index.update(collect_valuesets(package_dir))
+
+    if not bound_valuesets:
+        logging.error("No bound valuesets found in any IG")
+        return 1
 
     seen: Set[Tuple[str, str]] = set()
     deduped: List[Dict[str, str]] = []
@@ -365,8 +504,10 @@ def main() -> int:
     rows = build_rows(deduped, valueset_index, versions, endpoint)
 
     write_tsv(rows, output_path, versions)
+    write_html(rows, html_output_path, versions)
 
     logging.info("Wrote %s", output_path)
+    logging.info("Wrote %s", html_output_path)
     return 0
 
 

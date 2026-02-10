@@ -83,8 +83,8 @@ class IntegrationTests(unittest.TestCase):
         Skip this test if the server is unavailable or you want faster unit tests.
         """
         endpoint = "https://tx.ontoserver.csiro.au/fhir"
-        valueset_url = "https://healthterminologies.gov.au/fhir/ValueSet/gender-identity-response-1"
-        snomed_version = "20260131"  # Recent SNOMED AU version
+        valueset_url = "https://healthterminologies.gov.au/fhir/ValueSet/healthcare-organisation-role-type-1"
+        snomed_version = "20250531"  # Recent SNOMED AU version
         
         count = expand_valueset_count(endpoint, valueset_url, snomed_version)
         print(f"count is {count}\n")

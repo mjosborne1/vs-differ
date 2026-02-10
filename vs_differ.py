@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+from urllib.parse import quote
 
 import requests  # type: ignore[import-not-found]
 
@@ -193,15 +194,16 @@ def compute_versions(count: int, today: Optional[dt.date] = None) -> List[str]:
 def expand_valueset_count(
     endpoint: str, valueset_url: str, snomed_version: str
 ) -> Optional[int]:
-    params = {
-        "url": valueset_url,
-        "system-version": f"{SNOMED_AU_SYSTEM}|{snomed_version}",
-        "count": 0,
-        "offset": 0,
-    }
-    url = endpoint.rstrip("/") + "/ValueSet/$expand"
+    base_url = endpoint.rstrip("/") + "/ValueSet/$expand"
+    system_version = f"{SNOMED_BASE_SYSTEM}%7C{SNOMED_AU_SYSTEM}/version/{snomed_version}"
+    
+    # Build URL with encoded parameters
+    url = f"{base_url}?url={quote(valueset_url)}&system-version={system_version}&count=0&offset=0"
+    if valueset_url == "https://healthterminologies.gov.au/fhir/ValueSet/healthcare-organisation-role-type-1":
+        sys.stdout.write(f"url:{url}\n")
+        sys.stdout.flush()
     try:
-        response = requests.get(url, params=params, timeout=90)
+        response = requests.get(url, timeout=90)
     except requests.RequestException as exc:
         logging.warning("Expand request failed for %s: %s", valueset_url, exc)
         return None
@@ -219,6 +221,20 @@ def expand_valueset_count(
         return None
 
     expansion = payload.get("expansion") or {}
+    
+    # Log the actual version used by the server
+    used_version = None
+    for param in expansion.get("parameter") or []:
+        if param.get("name") == "used-codesystem":
+            used_version = param.get("valueUri")
+            break
+    
+    if used_version and snomed_version not in str(used_version):
+        logging.warning(
+            "Version mismatch for %s: requested %s but server used %s",
+            valueset_url, snomed_version, used_version
+        )
+    
     total = expansion.get("total")
     total_value = parse_int(total, -1)
     if total_value >= 0:

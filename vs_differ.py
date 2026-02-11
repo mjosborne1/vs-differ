@@ -651,11 +651,24 @@ def main() -> int:
 
     rows = build_rows(deduped, valueset_index, versions, endpoint)
     
+    # Filter out version columns that have no data across all rows
+    versions_with_data = []
+    for version in versions:
+        has_data = any(row.get(version) != "" and row.get(version) is not None for row in rows)
+        if has_data:
+            versions_with_data.append(version)
+    
+    # Remove empty version columns from rows
+    for row in rows:
+        for version in versions:
+            if version not in versions_with_data:
+                row.pop(version, None)
+    
     # Sort rows by ValueSet Name
     rows.sort(key=lambda r: str(r.get("valueset_name", "")).lower())
 
-    write_tsv(rows, output_path, versions)
-    write_html(rows, html_output_path, versions, endpoint, versions_to_compare, igs)
+    write_tsv(rows, output_path, versions_with_data)
+    write_html(rows, html_output_path, versions_with_data, endpoint, versions_to_compare, igs)
 
     logging.info("Wrote %s", output_path)
     logging.info("Wrote %s", html_output_path)

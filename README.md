@@ -141,16 +141,18 @@ Interactive HTML report with:
 
 ## Trending Analysis
 
-The HTML report highlights cells in red when an expansion count **decreases** from one version to the next. This helps identify:
+The HTML report highlights cells in red when an expansion count **decreases** compared to the next chronological SNOMED CT AU version. This helps identify:
 
-- ValueSets that are shrinking relative to SNOMED CT AU updates
-- Potential issues with valueset bindings
+- ValueSets that are shrinking in subsequent SNOMED CT AU versions
+- Potential issues with valueset bindings or concept changes
 - Deprecated concepts being removed from SNOMED CT AU
 
-Example:
+Example: If version 20250531 has count 508, and the next version 20250630 has count 353, the cell showing 353 will be highlighted in red to indicate a drop.
+
 ```
-ValueSet A: 100 -> 98 -> 95  (columns 2 and 3 highlighted in red)
-ValueSet B: 50 -> 50 -> 52   (no highlighting)
+Date:      20250531  20250630  20250731  ...
+ValueSet A:   508   353(red)   350(red)  ...  (counts dropped in next versions)
+ValueSet B:    50      50        52     ...   (no drops)
 ```
 
 ## Logging

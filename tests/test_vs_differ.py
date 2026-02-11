@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import unittest
+from typing import cast
 from unittest.mock import Mock, patch
 from vs_differ import expand_valueset_count, build_rows
 
@@ -23,26 +24,26 @@ class ExpandValueSetCountTests(unittest.TestCase):
     def test_total_int_is_used(self):
         response = FakeResponse(200, {"expansion": {"total": 42}})
         with patch("requests.get", return_value=response):
-            count = expand_valueset_count("https://example.com", "http://vs", "20240131")
+            count, title = expand_valueset_count("https://example.com", "http://vs", "20240131")
         self.assertEqual(count, 42)
 
     def test_total_string_is_parsed(self):
         response = FakeResponse(200, {"expansion": {"total": "7"}})
         with patch("requests.get", return_value=response):
-            count = expand_valueset_count("https://example.com", "http://vs", "20240131")
+            count, title = expand_valueset_count("https://example.com", "http://vs", "20240131")
         self.assertEqual(count, 7)
 
     def test_contains_list_is_counted(self):
         response = FakeResponse(200, {"expansion": {"contains": [{"code": "a"}, {"code": "b"}]}})
         with patch("requests.get", return_value=response):
-            count = expand_valueset_count("https://example.com", "http://vs", "20240131")
+            count, title = expand_valueset_count("https://example.com", "http://vs", "20240131")
         self.assertEqual(count, 2)
 
     def test_unexpected_expansion_returns_none(self):
         response = FakeResponse(200, {"expansion": {"contains": "not-a-list"}})
         with patch("requests.get", return_value=response):
             with self.assertLogs(level="WARNING"):
-                count = expand_valueset_count(
+                count, title = expand_valueset_count(
                     "https://example.com", "http://vs", "20240131"
                 )
         self.assertIsNone(count)
@@ -71,6 +72,11 @@ class BuildRowsTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["valueset_url"], "http://healthterminologies.gov.au/valueset/test")
+        # Should have structure_definitions field (as list of tuples)
+        self.assertIn("structure_definitions", rows[0])
+        sds = cast(list, rows[0]["structure_definitions"])
+        self.assertEqual(len(sds), 1)
+        self.assertEqual(sds[0], ("One", "http://example.org/StructureDefinition/One"))
 
 
 class IntegrationTests(unittest.TestCase):
@@ -86,8 +92,8 @@ class IntegrationTests(unittest.TestCase):
         valueset_url = "https://healthterminologies.gov.au/fhir/ValueSet/healthcare-organisation-role-type-1"
         snomed_version = "20250531"  # Recent SNOMED AU version
         
-        count = expand_valueset_count(endpoint, valueset_url, snomed_version)
-        print(f"count is {count}\n")
+        count, title = expand_valueset_count(endpoint, valueset_url, snomed_version)
+        print(f"count is {count}, title is {title}\n")
         # The count should be a positive integer
         self.assertIsNotNone(count, "Expansion should return a count")
         assert count is not None  # Type narrowing for Pylance

@@ -193,7 +193,11 @@ def compute_versions(count: int, today: Optional[dt.date] = None) -> List[str]:
 
 def expand_valueset_count(
     endpoint: str, valueset_url: str, snomed_version: str
-) -> Optional[int]:
+) -> tuple[Optional[int], Optional[str]]:
+    """Expand a valueset and return (count, title).
+    
+    Returns a tuple of (expansion_count, valueset_title) where either can be None.
+    """
     base_url = endpoint.rstrip("/") + "/ValueSet/$expand"
     system_version = f"{SNOMED_BASE_SYSTEM}%7C{SNOMED_AU_SYSTEM}/version/{snomed_version}"
     
@@ -203,20 +207,23 @@ def expand_valueset_count(
         response = requests.get(url, timeout=90)
     except requests.RequestException as exc:
         logging.warning("Expand request failed for %s: %s", valueset_url, exc)
-        return None
+        return None, None
 
     if response.status_code != 200:
         logging.warning(
             "Expand failed (%s) for %s version %s", response.status_code, valueset_url, snomed_version
         )
-        return None
+        return None, None
 
     try:
         payload = response.json()
     except json.JSONDecodeError:
         logging.warning("Invalid JSON response for %s", valueset_url)
-        return None
+        return None, None
 
+    # Extract title from response
+    title = payload.get("title") or payload.get("name")
+    
     expansion = payload.get("expansion") or {}
     
     # Log the actual version used by the server
@@ -235,12 +242,12 @@ def expand_valueset_count(
     total = expansion.get("total")
     total_value = parse_int(total, -1)
     if total_value >= 0:
-        return total_value
+        return total_value, title
     contains = expansion.get("contains")
     if isinstance(contains, list):
-        return len(contains)
+        return len(contains), title
     logging.warning("Unexpected expansion format for %s", valueset_url)
-    return None
+    return None, title
 
 
 def build_rows(
@@ -258,23 +265,51 @@ def build_rows(
             continue
         valueset = valueset_index.get(valueset_url) or {}
         valueset_name = valueset.get("name") or valueset.get("title") or ""
-        snomed_au = bool(valueset) and has_snomed_au_content(valueset)
 
         row: Dict[str, object] = {
             "valueset_url": valueset_url,
             "valueset_name": valueset_name,
-            "ncts": "yes" if ncts else "no",
-            "snomed_au": "yes" if snomed_au else "no",
             "structure_definition_url": item.get("structure_definition_url", ""),
             "structure_definition_name": item.get("structure_definition_name", ""),
         }
 
         if ncts and versions:
             for version in versions:
-                count = expand_func(endpoint, valueset_url, version)
+                count, api_title = expand_func(endpoint, valueset_url, version)
+                # Use title from API if not already set from local definition
+                if valueset_name == "" and api_title:
+                    valueset_name = api_title
+                    row["valueset_name"] = valueset_name
                 row[version] = "" if count is None else count
         rows.append(row)
-    return rows
+    
+    # Group rows by valueset_url, combining structure definitions
+    grouped: Dict[str, Dict[str, object]] = {}
+    for row in rows:
+        valueset_url = str(row["valueset_url"])
+        if valueset_url not in grouped:
+            grouped[valueset_url] = row
+            grouped[valueset_url]["structure_definitions"] = []
+        
+        # Collect structure definitions
+        sd_name = cast(str, row.get("structure_definition_name", ""))
+        sd_url = cast(str, row.get("structure_definition_url", ""))
+        if sd_name or sd_url:
+            sd_list = cast(List[Tuple[str, str]], grouped[valueset_url]["structure_definitions"])
+            sd_list.append((sd_name, sd_url))
+    
+    # Convert grouped data back to list format
+    result: List[Dict[str, object]] = []
+    for valueset_url, row in grouped.items():
+        sds = cast(List[Tuple[str, str]], row.pop("structure_definitions", []))
+        # Keep structure definitions as list of tuples for flexible formatting
+        row["structure_definitions"] = sds
+        # Remove individual structure definition columns
+        row.pop("structure_definition_url", None)
+        row.pop("structure_definition_name", None)
+        result.append(row)
+    
+    return result
 
 
 def write_tsv(
@@ -282,68 +317,99 @@ def write_tsv(
 ) -> None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     headers = [
-        "valueset_url",
-        "valueset_name",
-        "ncts",
-        "snomed_au",
-        "structure_definition_url",
-        "structure_definition_name",
+        "ValueSet Name",
+        "ValueSet URL",
+        "Structure Definitions",
     ] + version_columns
 
     with open(output_path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=headers, delimiter="\t")
         writer.writeheader()
         for row in rows:
-            writer.writerow(row)
+            # Format structure definitions as text for TSV
+            sds = row.get("structure_definitions", [])
+            if isinstance(sds, list):
+                sd_text = ", ".join(
+                    f"{name} ({url})" if name and url else (name or url)
+                    for name, url in cast(List[Tuple[str, str]], sds)
+                )
+            else:
+                sd_text = str(sds) if sds else ""
+            
+            # Map old keys to new header names for output
+            output_row = {
+                "ValueSet Name": row.get("valueset_name", ""),
+                "ValueSet URL": row.get("valueset_url", ""),
+                "Structure Definitions": sd_text,
+            }
+            for version in version_columns:
+                output_row[version] = row.get(version, "")
+            writer.writerow(output_row)
 
 
 def get_trending_status(row: Dict[str, object], version_columns: List[str]) -> Dict[str, str]:
-    """Determine which version cells should be highlighted (red for decreasing values)."""
+    """Determine which version cells should be highlighted (red for decreasing values).
+    
+    Highlights a cell if the count drops compared to the previous chronological version.
+    Since versions are ordered newest to oldest, checking i-1 compares to the next older version.
+    Highlights the newer version where the drop occurred.
+    
+    Example: 20250531=508, 20250630=353 -> highlight 353 (the drop at 20250630)
+    """
     trending = {}
-    for i, version in enumerate(version_columns):
-        current_val = row.get(version)
-        if current_val == "" or current_val is None:
-            trending[version] = ""
+    
+    # First, initialize all cells as not trending
+    for version in version_columns:
+        trending[version] = ""
+    
+    # Now check for drops: if a newer version (lower index) is lower than older (higher index)
+    for i in range(len(version_columns) - 1):
+        current_version = version_columns[i]  # Newer version
+        next_older_version = version_columns[i + 1]  # Older version
+        
+        current_val = row.get(current_version)
+        next_val = row.get(next_older_version)
+        
+        if current_val == "" or current_val is None or next_val == "" or next_val is None:
             continue
         
         try:
             current_int = int(cast(Any, current_val))
+            next_int = int(cast(Any, next_val))
+            # If newer value is less than older value, highlight the newer (drop occurred)
+            if current_int < next_int:
+                trending[current_version] = "trending-down"
         except (ValueError, TypeError):
-            trending[version] = ""
             continue
-        
-        # Check if value decreased compared to previous version
-        if i > 0:
-            prev_version = version_columns[i - 1]
-            prev_val = row.get(prev_version)
-            try:
-                prev_int = int(cast(Any, prev_val))
-                if current_int < prev_int:
-                    trending[version] = "trending-down"
-                else:
-                    trending[version] = ""
-            except (ValueError, TypeError):
-                trending[version] = ""
-        else:
-            trending[version] = ""
     
     return trending
 
 
 def write_html(
-    rows: List[Dict[str, object]], output_path: str, version_columns: List[str]
+    rows: List[Dict[str, object]], output_path: str, version_columns: List[str],
+    terminology_server: str = "", versions_to_compare: int = 0, config_igs: Optional[List[Dict[str, Any]]] = None
 ) -> None:
     """Write HTML file with trending visualization (red for decreasing values)."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
+    if config_igs is None:
+        config_igs = []
+    
     headers = [
-        "valueset_url",
-        "valueset_name",
-        "ncts",
-        "snomed_au",
-        "structure_definition_url",
-        "structure_definition_name",
+        "ValueSet Name",
+        "ValueSet URL",
+        "Structure Definitions",
     ] + version_columns
+    
+    # Map old keys to new header names
+    header_mapping = {
+        "ValueSet Name": "valueset_name",
+        "ValueSet URL": "valueset_url",
+        "Structure Definitions": "structure_definitions",
+    }
+    
+    # Build description from config
+    igs_text = ", ".join(f"{ig.get('id')}#{ig.get('version')}" for ig in config_igs if ig.get('id') and ig.get('version'))
     
     html_content = [
         "<!DOCTYPE html>",
@@ -353,6 +419,8 @@ def write_html(
         "<title>ValueSet Expansion Counts</title>",
         "<style>",
         "  body { font-family: Arial, sans-serif; margin: 20px; }",
+        "  .report-info { background-color: #f9f9f9; border-left: 4px solid #4CAF50; padding: 10px; margin-bottom: 20px; }",
+        "  .report-info p { margin: 5px 0; font-size: 14px; }",
         "  table { border-collapse: collapse; width: 100%; }",
         "  th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }",
         "  th { background-color: #4CAF50; color: white; }",
@@ -363,6 +431,12 @@ def write_html(
         "</head>",
         "<body>",
         "<h1>ValueSet Expansion Counts - Trending Analysis</h1>",
+        "<div class='report-info'>",
+        f"<p><strong>FHIR IGs:</strong> {igs_text}</p>",
+        f"<p><strong>Terminology Server:</strong> {terminology_server}</p>",
+        f"<p><strong>Versions Compared:</strong> {versions_to_compare} months</p>",
+        f"<p><strong>Version Range:</strong> {version_columns[0] if version_columns else 'N/A'} to {version_columns[-1] if version_columns else 'N/A'}</p>",
+        "</div>",
         "<table>",
     ]
     
@@ -381,7 +455,22 @@ def write_html(
         html_content.append("<tr>")
         
         for header in headers:
-            value = row.get(header, "")
+            # Get the value using the mapping
+            if header in header_mapping:
+                key = header_mapping[header]
+                value = row.get(key, "")
+                
+                # Format structure definitions as HTML links
+                if key == "structure_definitions" and isinstance(value, list):
+                    links = ", ".join(
+                        f"<a href='{url}'>{name}</a>" if url and name else (f"<a href='{url}'>Link</a>" if url else name)
+                        for name, url in cast(List[Tuple[str, str]], value)
+                    )
+                    html_content.append(f"<td>{links}</td>")
+                    continue
+            else:
+                value = row.get(header, "")
+            
             is_version_col = header in version_columns
             
             if is_version_col and trending.get(header) == "trending-down":
@@ -502,9 +591,12 @@ def main() -> int:
     versions = compute_versions(versions_to_compare)
 
     rows = build_rows(deduped, valueset_index, versions, endpoint)
+    
+    # Sort rows by ValueSet Name
+    rows.sort(key=lambda r: str(r.get("valueset_name", "")).lower())
 
     write_tsv(rows, output_path, versions)
-    write_html(rows, html_output_path, versions)
+    write_html(rows, html_output_path, versions, endpoint, versions_to_compare, igs)
 
     logging.info("Wrote %s", output_path)
     logging.info("Wrote %s", html_output_path)

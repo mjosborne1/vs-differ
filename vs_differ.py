@@ -191,6 +191,38 @@ def compute_versions(count: int, today: Optional[dt.date] = None) -> List[str]:
     return versions
 
 
+def validate_versions_on_server(
+    endpoint: str, valueset_index: Dict[str, Dict[str, Any]], versions: List[str]
+) -> List[str]:
+    """Validate which versions are available on the terminology server.
+    
+    Returns only the versions that are actually published on the server.
+    Filters out versions that have not been released or pre-published.
+    """
+    valid_versions = []
+    
+    # Find a NCTS valueset to test with
+    test_valueset_url = None
+    for url in valueset_index.keys():
+        if is_ncts_valueset(url):
+            test_valueset_url = url
+            break
+    
+    if not test_valueset_url:
+        # If no valuesets available, assume all versions are valid
+        return versions
+    
+    for version in versions:
+        count, title = expand_valueset_count(endpoint, test_valueset_url, version)
+        if count is not None:  # Version was successfully expanded
+            valid_versions.append(version)
+            logging.info("Version %s is available on terminology server", version)
+        else:
+            logging.warning("Version %s not available on terminology server", version)
+    
+    return valid_versions
+
+
 def expand_valueset_count(
     endpoint: str, valueset_url: str, snomed_version: str
 ) -> tuple[Optional[int], Optional[str]]:
@@ -238,6 +270,7 @@ def expand_valueset_count(
             "Version mismatch for %s: requested %s but server used %s",
             valueset_url, snomed_version, used_version
         )
+        return None, None  # Return None for version mismatches
     
     total = expansion.get("total")
     total_value = parse_int(total, -1)
@@ -311,6 +344,23 @@ def build_rows(
     
     return result
 
+def is_change_significant(base_value, new_value):
+    """
+    Determines if a change is significant based on a sliding scale.
+    Threshold = 0.5118 * (Value ^ 0.6257)
+    """
+    # Calculate the absolute difference
+    difference = abs(new_value - base_value)
+    
+    # The constants derived from your points (500, 25) and (60,000, 500)
+    # This creates a curve where the % required drops as the number grows.
+    exponent = 0.6257
+    coefficient = 0.5118
+    
+    # Calculate the dynamic threshold for this specific base value
+    threshold = coefficient * (base_value ** exponent)
+    
+    return difference >= threshold, round(threshold, 2)
 
 def write_tsv(
     rows: List[Dict[str, object]], output_path: str, version_columns: List[str]
@@ -376,9 +426,11 @@ def get_trending_status(row: Dict[str, object], version_columns: List[str]) -> D
         try:
             current_int = int(cast(Any, current_val))
             next_int = int(cast(Any, next_val))
-            # If newer value is less than older value, highlight the newer (drop occurred)
+            # If newer value is less than older value AND the change is significant, highlight
             if current_int < next_int:
-                trending[current_version] = "trending-down"
+                is_significant, threshold = is_change_significant(next_int, current_int)
+                if is_significant:
+                    trending[current_version] = "trending-down"
         except (ValueError, TypeError):
             continue
     
@@ -589,6 +641,13 @@ def main() -> int:
             deduped.append(item)
 
     versions = compute_versions(versions_to_compare)
+    
+    # Validate that versions are available on the server (filters out unreleased versions)
+    versions = validate_versions_on_server(endpoint, valueset_index, versions)
+    
+    if not versions:
+        logging.error("No valid versions found on terminology server")
+        return 1
 
     rows = build_rows(deduped, valueset_index, versions, endpoint)
     

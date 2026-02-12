@@ -298,6 +298,11 @@ def build_rows(
     for item in deduped:
         valueset_url = item.get("valueset_url", "")
         ncts = is_ncts_valueset(valueset_url)
+        
+        # Skip non-NCTS valuesets entirely
+        if not ncts:
+            continue
+            
         valueset = valueset_index.get(valueset_url) or {}
         valueset_name = valueset.get("name") or valueset.get("title") or ""
 
@@ -308,8 +313,8 @@ def build_rows(
             "structure_definition_name": item.get("structure_definition_name", ""),
         }
 
-        # Only expand NCTS valuesets
-        if ncts and versions:
+        # Expand NCTS valuesets
+        if versions:
             for version in versions:
                 count, api_title = expand_func(endpoint, valueset_url, version, valueset)
                 # Use title from API if not already set from local definition

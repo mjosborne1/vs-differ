@@ -3,6 +3,7 @@
   "versions_to_compare": 12,
   "output_filename": "vs-diff.tsv",
   "data_folder": "~/data/vs-differ",
+  "dev": false,
   "ig": [
     {
       "id": "hl7.fhir.au.base",

@@ -11,6 +11,13 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple, cas
 from urllib.parse import quote
 
 import requests  # type: ignore[import-not-found]
+try:
+    import pandas as pd
+    from openpyxl import Workbook
+    from openpyxl.chart import LineChart, Reference
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
 
 NCTS_PREFIXES = (
     "http://healthterminologies.gov.au",
@@ -557,6 +564,165 @@ def write_html(
         handle.write("\n".join(html_content))
 
 
+def write_chart_html(
+    rows: List[Dict[str, object]], output_path: str, version_columns: List[str]
+) -> None:
+    """Create HTML file with SVG line chart showing version trends.
+    
+    Creates an interactive HTML page with an embedded SVG chart showing
+    valueset counts across versions from oldest to newest.
+    """
+    import math
+    
+    # Reverse version columns to show oldest -> newest
+    reversed_versions = list(reversed(version_columns))
+    
+    # Prepare data for charting
+    chart_data = []
+    for row in rows:
+        name = str(row.get("valueset_name", ""))
+        values = []
+        for version in reversed_versions:
+            val = row.get(version, "")
+            if val != "" and val is not None:
+                try:
+                    values.append(float(cast(Any, val)))
+                except (ValueError, TypeError):
+                    values.append(None)
+            else:
+                values.append(None)
+        # Only include series with at least some data
+        if any(v is not None for v in values):
+            chart_data.append({"name": name, "values": values})
+    
+    # Chart dimensions
+    width = 1400
+    height = 800
+    margin_left = 80
+    margin_right = 300
+    margin_top = 60
+    margin_bottom = 80
+    chart_width = width - margin_left - margin_right
+    chart_height = height - margin_top - margin_bottom
+    
+    # Find min/max values for scaling (use log scale)
+    all_values = [v for series in chart_data for v in series["values"] if v is not None and v > 0]
+    if not all_values:
+        logging.warning("No valid data for chart generation")
+        return
+    
+    min_val = min(all_values)
+    max_val = max(all_values)
+    
+    # Use log scale for Y axis
+    log_min = math.floor(math.log10(min_val))
+    log_max = math.ceil(math.log10(max_val))
+    
+    def y_scale(value):
+        """Scale value to Y coordinate (log scale)"""
+        if value is None or value <= 0:
+            return None
+        log_val = math.log10(value)
+        ratio = (log_val - log_min) / (log_max - log_min)
+        return margin_top + chart_height - (ratio * chart_height)
+    
+    def x_scale(index):
+        """Scale index to X coordinate"""
+        return margin_left + (index * chart_width / (len(reversed_versions) - 1))
+    
+    # Generate color palette
+    def get_color(index):
+        colors = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00', 
+                  '#ffff33', '#a65628', '#f781bf', '#999999', '#66c2a5',
+                  '#fc8d62', '#8da0cb', '#e78ac3', '#a6d854', '#ffd92f']
+        return colors[index % len(colors)]
+    
+    # Build SVG content
+    svg_lines = []
+    
+    # Draw Y-axis grid lines and labels
+    for i in range(log_min, log_max + 1):
+        y = y_scale(10 ** i)
+        if y is not None:
+            svg_lines.append(f'<line x1="{margin_left}" y1="{y}" x2="{margin_left + chart_width}" y2="{y}" stroke="#e0e0e0" stroke-width="1"/>')
+            svg_lines.append(f'<text x="{margin_left - 10}" y="{y + 5}" text-anchor="end" font-size="12" fill="#666">10^{i}</text>')
+    
+    # Draw X-axis labels
+    for i, version in enumerate(reversed_versions):
+        x = x_scale(i)
+        svg_lines.append(f'<text x="{x}" y="{margin_top + chart_height + 30}" text-anchor="middle" font-size="11" fill="#666">{version}</text>')
+    
+    # Draw axes
+    svg_lines.append(f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + chart_height}" stroke="#333" stroke-width="2"/>')
+    svg_lines.append(f'<line x1="{margin_left}" y1="{margin_top + chart_height}" x2="{margin_left + chart_width}" y2="{margin_top + chart_height}" stroke="#333" stroke-width="2"/>')
+    
+    # Draw lines for each valueset
+    legend_items = []
+    for idx, series in enumerate(chart_data):
+        color = get_color(idx)
+        points = []
+        for i, value in enumerate(series["values"]):
+            y = y_scale(value)
+            if y is not None:
+                x = x_scale(i)
+                points.append(f"{x},{y}")
+        
+        if points:
+            polyline = f'<polyline points="{" ".join(points)}" fill="none" stroke="{color}" stroke-width="2"/>'
+            svg_lines.append(polyline)
+            
+            # Add points
+            for i, value in enumerate(series["values"]):
+                y = y_scale(value)
+                if y is not None:
+                    x = x_scale(i)
+                    svg_lines.append(f'<circle cx="{x}" cy="{y}" r="3" fill="{color}"/>')
+            
+            legend_items.append((color, series["name"]))
+    
+    # Create legend
+    legend_y = margin_top
+    for color, name in legend_items[:20]:  # Limit to first 20 for readability
+        svg_lines.append(f'<line x1="{margin_left + chart_width + 20}" y1="{legend_y}" x2="{margin_left + chart_width + 50}" y2="{legend_y}" stroke="{color}" stroke-width="2"/>')
+        svg_lines.append(f'<text x="{margin_left + chart_width + 55}" y="{legend_y + 4}" font-size="11" fill="#333">{name[:35]}</text>')
+        legend_y += 20
+    
+    # Axis titles
+    svg_lines.append(f'<text x="{margin_left + chart_width / 2}" y="{margin_top + chart_height + 60}" text-anchor="middle" font-size="14" font-weight="bold" fill="#333">Version (Oldest to Newest)</text>')
+    svg_lines.append(f'<text x="{margin_left - 60}" y="{margin_top + chart_height / 2}" text-anchor="middle" font-size="14" font-weight="bold" fill="#333" transform="rotate(-90, {margin_left - 60}, {margin_top + chart_height / 2})">Count of Elements (log scale)</text>')
+    svg_lines.append(f'<text x="{width / 2}" y="{margin_top - 20}" text-anchor="middle" font-size="18" font-weight="bold" fill="#333">ValueSet Element Counts Across Versions</text>')
+    
+    # Generate HTML
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset='UTF-8'>
+    <title>ValueSet Counts Chart</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }}
+        .container {{ max-width: {width + 40}px; margin: 0 auto; background-color: white; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        svg {{ display: block; margin: 20px auto; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">
+            {chr(10).join(svg_lines)}
+        </svg>
+        <p style="text-align: center; color: #666; font-size: 12px;">
+            Showing trends for {len(chart_data)} valuesets across {len(reversed_versions)} versions
+        </p>
+    </div>
+</body>
+</html>"""
+    
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+    except Exception as exc:
+        logging.warning("Failed to create chart HTML: %s", exc)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -598,6 +764,7 @@ def main() -> int:
     versions_to_compare = parse_int(config.get("versions_to_compare"), 0)
     output_filename = str(config.get("output_filename", "vs-diff.tsv"))
     data_folder = expand_user(str(config.get("data_folder", "~/data/vs-differ")))
+    dev_mode = config.get("dev", False)
 
     output_path = os.path.join(data_folder, output_filename)
     html_output_path = output_path.replace(".tsv", ".html")
@@ -652,6 +819,14 @@ def main() -> int:
         if key not in seen:
             seen.add(key)
             deduped.append(item)
+
+    logging.info("Found %d unique ValueSets bound in elements", len(deduped))
+
+    # Dev mode: limit to first 5 NCTS valuesets for faster testing
+    if dev_mode:
+        ncts_deduped = [vs for vs in deduped if is_ncts_valueset(vs.get("valueset_url", ""))]
+        deduped = ncts_deduped[:5]
+        logging.info("DEV MODE: Limited to %d valuesets for testing", len(deduped))
 
     versions = compute_versions(versions_to_compare)
     
@@ -710,9 +885,14 @@ def main() -> int:
 
     write_tsv(rows, output_path, versions)
     write_html(rows, html_output_path, versions, endpoint, versions_to_compare, igs)
+    
+    # Create HTML chart
+    chart_output_path = output_path.replace(".tsv", "-chart.html")
+    write_chart_html(rows, chart_output_path, versions)
 
     logging.info("Wrote %s", output_path)
     logging.info("Wrote %s", html_output_path)
+    logging.info("Wrote %s", chart_output_path)
     return 0
 
 

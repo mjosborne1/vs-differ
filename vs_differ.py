@@ -199,32 +199,26 @@ def validate_versions_on_server(
     Returns only the versions that are actually published on the server.
     Filters out versions that have not been released or pre-published.
     """
-    valid_versions = []
-    
-    # Find a NCTS valueset to test with
-    test_valueset_url = None
-    for url in valueset_index.keys():
+    # Find an NCTS valueset to test with
+    for url, valueset_def in valueset_index.items():
         if is_ncts_valueset(url):
-            test_valueset_url = url
-            break
+            # Test each version using this NCTS valueset
+            valid_versions = []
+            for version in versions:
+                count, _ = expand_valueset_count(endpoint, url, version, valueset_def)
+                if count is not None:
+                    valid_versions.append(version)
+                    logging.info("Version %s is available on terminology server", version)
+                else:
+                    logging.warning("Version %s not available on terminology server", version)
+            return valid_versions
     
-    if not test_valueset_url:
-        # If no valuesets available, assume all versions are valid
-        return versions
-    
-    for version in versions:
-        count, title = expand_valueset_count(endpoint, test_valueset_url, version)
-        if count is not None:  # Version was successfully expanded
-            valid_versions.append(version)
-            logging.info("Version %s is available on terminology server", version)
-        else:
-            logging.warning("Version %s not available on terminology server", version)
-    
-    return valid_versions
+    # No NCTS valueset found, assume all versions are valid
+    return versions
 
 
 def expand_valueset_count(
-    endpoint: str, valueset_url: str, snomed_version: str
+    endpoint: str, valueset_url: str, snomed_version: str, valueset_def: Optional[Dict[str, Any]] = None
 ) -> tuple[Optional[int], Optional[str]]:
     """Expand a valueset and return (count, title).
     
@@ -258,19 +252,29 @@ def expand_valueset_count(
     
     expansion = payload.get("expansion") or {}
     
-    # Log the actual version used by the server
-    used_version = None
-    for param in expansion.get("parameter") or []:
-        if param.get("name") == "used-codesystem":
-            used_version = param.get("valueUri")
-            break
+    # Check if valueset contains SNOMED content
+    has_snomed = valueset_def and has_snomed_au_content(valueset_def)
     
-    if used_version and snomed_version not in str(used_version):
-        logging.warning(
-            "Version mismatch for %s: requested %s but server used %s",
-            valueset_url, snomed_version, used_version
-        )
-        return None, None  # Return None for version mismatches
+    # Only validate SNOMED version for valuesets that contain SNOMED codes
+    if has_snomed:
+        # Check if the server used the requested SNOMED version
+        # Look for SNOMED-specific used-codesystem parameters
+        snomed_version_used = None
+        for param in expansion.get("parameter") or []:
+            if param.get("name") == "used-codesystem":
+                used_version = param.get("valueUri")
+                # Only check SNOMED codesystems
+                if used_version and ("snomed.info/sct" in str(used_version).lower()):
+                    snomed_version_used = used_version
+                    break
+        
+        # If we found a SNOMED codesystem in use, verify it matches what we requested
+        if snomed_version_used and snomed_version not in str(snomed_version_used):
+            logging.warning(
+                "SNOMED version mismatch for %s: requested %s but server used %s",
+                valueset_url, snomed_version, snomed_version_used
+            )
+            return None, None  # Return None for SNOMED version mismatches
     
     total = expansion.get("total")
     total_value = parse_int(total, -1)
@@ -294,8 +298,6 @@ def build_rows(
     for item in deduped:
         valueset_url = item.get("valueset_url", "")
         ncts = is_ncts_valueset(valueset_url)
-        if not ncts:
-            continue
         valueset = valueset_index.get(valueset_url) or {}
         valueset_name = valueset.get("name") or valueset.get("title") or ""
 
@@ -306,9 +308,10 @@ def build_rows(
             "structure_definition_name": item.get("structure_definition_name", ""),
         }
 
+        # Only expand NCTS valuesets
         if ncts and versions:
             for version in versions:
-                count, api_title = expand_func(endpoint, valueset_url, version)
+                count, api_title = expand_func(endpoint, valueset_url, version, valueset)
                 # Use title from API if not already set from local definition
                 if valueset_name == "" and api_title:
                     valueset_name = api_title
@@ -575,6 +578,11 @@ def main() -> int:
         default=DEFAULT_CACHE_DIR,
         help=f"FHIR package cache (default: {DEFAULT_CACHE_DIR})",
     )
+    parser.add_argument(
+        "-v",
+        "--sctver",
+        help="Latest SNOMED CT AU version (YYYYMMDD format). Versions newer than this will be filtered out. If not specified, versions more than 7 days in the future will be removed.",
+    )
     args = parser.parse_args()
 
     config_path = expand_user(args.config)
@@ -647,6 +655,47 @@ def main() -> int:
     
     if not versions:
         logging.error("No valid versions found on terminology server")
+        return 1
+
+    # Filter out versions based on sctver or 7-day future cutoff
+    if args.sctver:
+        # User specified latest SNOMED CT AU version
+        try:
+            max_version_date = dt.datetime.strptime(args.sctver, "%Y%m%d").date()
+            logging.info("Using SNOMED CT AU version cutoff: %s", args.sctver)
+        except ValueError:
+            logging.error("Invalid sctver format: %s (expected YYYYMMDD)", args.sctver)
+            return 1
+    else:
+        # Default to 7 days in the future
+        today = dt.date.today()
+        max_version_date = today + dt.timedelta(days=7)
+        logging.info("Using default cutoff: 7 days in future from %s", today)
+    
+    filtered_versions = []
+    for version in versions:
+        try:
+            version_date = dt.datetime.strptime(version, "%Y%m%d").date()
+            if version_date > max_version_date:
+                if args.sctver:
+                    logging.info(
+                        "Removing version %s: newer than specified SNOMED CT AU version %s",
+                        version, args.sctver
+                    )
+                else:
+                    logging.info(
+                        "Removing version %s: more than 7 days in the future",
+                        version
+                    )
+            else:
+                filtered_versions.append(version)
+        except ValueError:
+            logging.warning("Invalid version date format: %s", version)
+            continue
+    
+    versions = filtered_versions
+    if not versions:
+        logging.error("No versions remain after filtering")
         return 1
 
     rows = build_rows(deduped, valueset_index, versions, endpoint)

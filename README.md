@@ -220,24 +220,77 @@ requested 20250531 but server used http://snomed.info/sct|.../version/20260131
 {
   "ig": [
     {"id": "hl7.fhir.au.base", "version": "6.0.0"},
-    {"id": "hl7.fhir.au.core", "version": "2.0.0"}
-  ]
+    {"id": "hl7.fhir.au.core", "version": "2.0.0"},
+    {"id": "hl7.fhir.au.ereq", "version": "dev"},
+    {"id": "hl7.fhir.au.ps", "version": "dev"}
+  ],
+  "versions_to_compare": 12
 }
 ```
 
-2. Run the tool:
+2. Run the tool with version filter:
 ```bash
-python vs_differ.py
+python vs_differ.py -v 20260131
 ```
 
-3. View the reports:
+3. View the web dashboard:
+```bash
+open ~/data/vs-differ/web/index.html
+```
+
+4. Or view individual files:
 ```bash
 # Data analysis
 less ~/data/vs-differ/vs-diff.tsv
 
-# Visual inspection
-open ~/data/vs-differ/vs-diff.html
+# Data table
+open ~/data/vs-differ/web/table.html
+
+# Charts
+open ~/data/vs-differ/web/chart-low.html
 ```
+
+### Dev mode workflow
+
+Enable dev mode for rapid iteration without re-processing FHIR packages:
+
+1. Set `"dev": true` in config.json
+
+2. First run creates the TSV file:
+```bash
+python vs_differ.py -v 20260131
+# Processes FHIR packages, calls terminology server, generates TSV + web files
+```
+
+3. Subsequent runs use cached TSV:
+```bash
+python vs_differ.py -v 20260131
+# Skips FHIR processing, regenerates web files from TSV in seconds
+```
+
+This is useful when:
+- Tweaking chart colors or styling
+- Adjusting dashboard layout
+- Testing different visualizations
+- Making quick changes without waiting for API calls
+
+### Deploying to GitHub Pages
+
+1. Create a GitHub repository for deployment
+2. Copy web folder contents:
+```bash
+cp -r ~/data/vs-differ/web/* /path/to/your/github-pages-repo/
+```
+
+3. Commit and push:
+```bash
+cd /path/to/your/github-pages-repo/
+git add .
+git commit -m "Update NCTS ValueSet analysis"
+git push
+```
+
+4. Access at `https://yourusername.github.io/yourrepo/`
 
 ### Running tests
 
@@ -272,9 +325,29 @@ This typically occurs when:
 ### Empty valueset columns
 
 If a ValueSet doesn't show expansion counts, it's likely because:
-- The ValueSet is not from NCTS (filter: `ncts` column != "yes")
+- The ValueSet is not from NCTS (only processes NCTS valuesets)
 - The expansion request failed (check logs)
 - The valueset contains no SNOMED codes in the selected version
+
+### Dev mode not using cached TSV
+
+**Issue**: Dev mode still processes FHIR packages instead of using TSV
+
+**Solutions**:
+- Verify `"dev": true` is set in config.json
+- Ensure TSV file exists at the expected path (check `data_folder` and `output_filename` in config)
+- Check file permissions on the TSV file
+- Review logs for "DEV MODE: Using existing TSV file" message
+
+### Charts not displaying
+
+**Issue**: Charts show empty or don't render
+
+**Solutions**:
+- Check browser console for JavaScript errors
+- Ensure all chart files were generated (chart-low.html, chart-medium.html, chart-high.html)
+- Verify valuesets exist in each count range
+- Check that SVG height accommodates all legend items
 
 ## Architecture
 
@@ -286,8 +359,11 @@ If a ValueSet doesn't show expansion counts, it's likely because:
 
 - `expand_valueset_count()`: Query terminology server for expansion count
 - `build_rows()`: Process valuesets and fetch counts
+- `read_tsv_data()`: Load cached TSV data in dev mode
 - `write_tsv()`: Generate TSV report
-- `write_html()`: Generate HTML report with trending analysis
+- `write_html()`: Generate HTML data table with trending analysis
+- `write_chart_html()`: Generate three chart HTML files by count ranges
+- `create_web_folder()`: Create deployment-ready web folder with index.html
 - `get_trending_status()`: Detect count decreases for highlighting
 
 ## Contributing

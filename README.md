@@ -14,7 +14,13 @@ A Python tool for comparing SNOMED CT AU valueset expansions across multiple FHI
 
 - **Multi-IG Support**: Process multiple FHIR IGs in a single run via configuration
 - **Version Trending**: Automatically detects when valueset expansion counts decrease between versions
-- **Dual Output**: Generates both TSV (for data analysis) and HTML (for visualization) reports
+- **Interactive Web Dashboard**: Modern tabbed interface with data table and three chart views
+- **Chart Visualization**: Separate charts for low (<1K), medium (1K-50K), and high (>50K) count valuesets with linear scaling
+- **Interactive Tooltips**: Hover over chart lines to see valueset names and data points to see counts
+- **Version Filtering**: Filter results to specific SNOMED CT AU versions using `--sctver` option
+- **Dev Mode**: Fast regeneration from cached TSV data for rapid development and testing
+- **GitHub Pages Ready**: Generates deployment-ready web folder with index.html
+- **Responsive Design**: Wide viewport support (98% width) for maximum data visibility
 - **Flexible Configuration**: Uses JSON config file for IGs, terminology server endpoint, and comparison versions
 - **Comprehensive Logging**: Detailed logs for troubleshooting and version mismatch detection
 
@@ -57,6 +63,7 @@ Configure the tool using `config.json`:
   "versions_to_compare": 12,
   "output_filename": "vs-diff.tsv",
   "data_folder": "~/data/vs-differ",
+  "dev": false,
   "ig": [
     {
       "id": "hl7.fhir.au.base",
@@ -78,6 +85,7 @@ Configure the tool using `config.json`:
 | `versions_to_compare` | Number of recent SNOMED CT AU month-end versions to fetch | `12` |
 | `output_filename` | Name of the output TSV file | `vs-diff.tsv` |
 | `data_folder` | Directory for output files and logs | `~/data/vs-differ` |
+| `dev` | Dev mode: if true and TSV exists, skip FHIR processing and regenerate HTML/charts from TSV | `false` |
 | `ig` | Array of FHIR IGs to process (id and version pairs) | `[]` |
 
 ### SNOMED CT AU Versions
@@ -97,6 +105,14 @@ python vs_differ.py
 
 This processes all IGs defined in the `ig` array in `config.json`.
 
+### Filter to specific SNOMED CT AU version
+
+```bash
+python vs_differ.py -v 20260131
+```
+
+This filters results to only include SNOMED CT AU versions up to and including the specified version (YYYYMMDD format).
+
 ### Run with specific IG (legacy mode)
 
 ```bash
@@ -113,31 +129,57 @@ python vs_differ.py --help
 
 - `--config`: Path to config JSON file (default: `config.json`)
 - `--cache-dir`: FHIR package cache directory (default: `~/.fhir/packages`)
+- `-v, --sctver`: Latest SNOMED CT AU version (YYYYMMDD format). Versions newer than this will be filtered out. If not specified, versions more than 7 days in the future will be removed.
 
 ## Output Files
 
 ### TSV Report
 
-**File**: `vs-diff.tsv`
+**File**: `~/data/vs-differ/vs-diff.tsv`
 
 Tab-separated values file with columns:
-- `valueset_url`: The official URL of the ValueSet
-- `valueset_name`: Human-readable ValueSet name
-- `ncts`: Whether the ValueSet is from NCTS (yes/no)
-- `snomed_au`: Whether the ValueSet contains SNOMED AU content (yes/no)
-- `structure_definition_url`: URL of the StructureDefinition using this ValueSet
-- `structure_definition_name`: Name of the StructureDefinition
+- `ValueSet Name`: Human-readable ValueSet name
+- `ValueSet URL`: The official URL of the ValueSet
+- `Structure Definitions`: List of StructureDefinitions using this ValueSet
 - Version columns (one per SNOMED CT AU version): Expansion counts or empty if not applicable
 
-### HTML Report
+### Web Dashboard
 
-**File**: `vs-diff.html`
+**Folder**: `~/data/vs-differ/web/`
 
-Interactive HTML report with:
-- Styled table with alternating row colors
-- **Red highlighting** on cells where counts decreased compared to the previous version
-- Legend explaining the trending indicator
-- Centered version columns for easy scanning
+Interactive web dashboard with:
+- **index.html**: Main dashboard with tabbed interface
+- **table.html**: Data table showing all valuesets and counts with red highlighting for decreases
+- **chart-low.html**: Chart for valuesets with <1,000 elements
+- **chart-medium.html**: Chart for valuesets with 1,000-50,000 elements
+- **chart-high.html**: Chart for valuesets with >50,000 elements
+
+#### Dashboard Features
+
+- **Tabbed navigation**: Switch between data table and different chart views
+- **Interactive tooltips**: Hover over chart lines to see valueset names, hover over data points to see counts
+- **Responsive design**: Wide viewport (98% width) and tall iframe (1600px) for maximum visibility
+- **Modern styling**: Blue color scheme (#1D7DB3) with gradient headers
+- **Version range display**: Shows oldest to newest versions in the header
+- **GitHub link**: Footer includes link to the repository
+
+### Chart Visualization
+
+Charts use linear scaling with:
+- X-axis: SNOMED CT AU versions (oldest to newest)
+- Y-axis: Element count
+- Color-coded lines: Each valueset gets a unique color
+- Interactive legend: Shows all valuesets with color indicators
+- Dynamic height: SVG height adjusts to accommodate all legend items
+
+### GitHub Pages Deployment
+
+The `web/` folder is ready for deployment to GitHub Pages:
+
+1. Copy contents to your GitHub Pages repository
+2. Push to GitHub
+3. Enable GitHub Pages in repository settings
+4. Access at `https://yourusername.github.io/yourrepo/`
 
 ## Trending Analysis
 
